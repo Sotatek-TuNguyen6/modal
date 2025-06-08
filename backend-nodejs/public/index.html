@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>CLIP Image Management - Tìm kiếm</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      line-height: 1.6;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 20px;
+      color: #333;
+    }
+    h2 {
+      color: #2c3e50;
+      border-bottom: 2px solid #eee;
+      padding-bottom: 10px;
+    }
+    h3 {
+      color: #3498db;
+      margin-top: 30px;
+    }
+    .note {
+      color: #555;
+      font-size: 0.9em;
+      margin: 5px 0;
+      font-style: italic;
+    }
+    .preview-container {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 10px;
+      margin-bottom: 10px;
+    }
+    .preview-image {
+      width: 150px;
+      height: 150px;
+      object-fit: cover;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      transition: transform 0.2s;
+    }
+    .preview-image:hover {
+      transform: scale(1.05);
+      box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    }
+    .form-group {
+      margin-bottom: 15px;
+    }
+    .form-group label {
+      display: block;
+      margin-bottom: 5px;
+      font-weight: bold;
+    }
+    .form-control {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      box-sizing: border-box;
+    }
+    .btn {
+      background-color: #3498db;
+      color: white;
+      border: none;
+      padding: 10px 15px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 16px;
+    }
+    .btn:hover {
+      background-color: #2980b9;
+    }
+    .result-container {
+      margin-top: 20px;
+      padding: 15px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background-color: #f9f9f9;
+    }
+    .image-card {
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      padding: 10px;
+      text-align: center;
+      background-color: white;
+    }
+    .image-card-info {
+      margin-top: 5px;
+      font-size: 0.9em;
+    }
+    .loading {
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      border: 3px solid rgba(0,0,0,0.3);
+      border-radius: 50%;
+      border-top-color: #3498db;
+      animation: spin 1s ease-in-out infinite;
+      margin-right: 10px;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    .hidden {
+      display: none;
+    }
+    .nav-menu {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+      padding: 10px 0;
+      border-bottom: 2px solid #3498db;
+    }
+    .nav-link {
+      padding: 8px 15px;
+      text-decoration: none;
+      color: #3498db;
+      border-radius: 4px;
+      transition: background-color 0.3s;
+    }
+    .nav-link:hover {
+      background-color: #f1f1f1;
+    }
+    .nav-link.active {
+      background-color: #3498db;
+      color: white;
+    }
+  </style>
+</head>
+<body>
+  <h2>🔍 CLIP Image Management System</h2>
+  
+  <!-- Navigation Menu -->
+  <div class="nav-menu">
+    <a href="index.html" class="nav-link active">Tìm kiếm ảnh</a>
+    <a href="upload.html" class="nav-link">Thêm ảnh</a>
+    <a href="customer.html" class="nav-link">Quản lý khách hàng</a>
+  </div>
+  
+  <h3>🔍 Tìm kiếm ảnh tương tự</h3>
+  <form id="searchForm" enctype="multipart/form-data">
+    <div class="form-group">
+      <label for="searchImage">Chọn ảnh để tìm kiếm:</label>
+      <input type="file" name="image" accept=".jpg,.jpeg,image/jpeg,image/jpg" required id="searchImage" class="form-control" />
+      <p class="note">Chỉ chấp nhận file JPG/JPEG</p>
+    </div>
+
+    <div class="form-group">
+      <label for="searchCustomer">Khách hàng (tùy chọn):</label>
+      <select name="customer" id="searchCustomer" class="form-control">
+        <option value="">-- Tất cả khách hàng --</option>
+        <!-- Customer options will be loaded dynamically -->
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label for="searchFolder">Thư mục (tùy chọn):</label>
+      <input type="text" name="folder" id="searchFolder" placeholder="Tên thư mục" class="form-control" />
+    </div>
+
+    <div id="searchPreview" class="preview-container"></div>
+    <button type="submit" class="btn">
+      <span id="searchLoading" class="loading hidden"></span>
+      Tìm kiếm
+    </button>
+  </form>
+  <div id="searchResults" class="result-container" style="display: none;"></div>
+
+  <script>
+    // Load customers for dropdowns
+    async function loadCustomers() {
+      try {
+        const response = await fetch('/api/customers');
+        const customers = await response.json();
+        
+        // Populate customer dropdown
+        const searchCustomerSelect = document.getElementById('searchCustomer');
+        
+        // Clear existing options except the first one
+        searchCustomerSelect.innerHTML = '<option value="">-- Tất cả khách hàng --</option>';
+        
+        // Add customer options
+        customers.forEach(customer => {
+          const option = document.createElement('option');
+          option.value = customer._id;
+          option.textContent = `${customer.name} (${customer.code})`;
+          searchCustomerSelect.appendChild(option);
+        });
+      } catch (error) {
+        console.error('Error loading customers:', error);
+      }
+    }
+    
+    // Preview for search image
+    document.getElementById('searchImage').addEventListener('change', function(e) {
+      const preview = document.getElementById('searchPreview');
+      preview.innerHTML = '';
+      
+      if (this.files && this.files[0]) {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+          const img = document.createElement('img');
+          img.src = e.target.result;
+          img.classList.add('preview-image');
+          preview.appendChild(img);
+        }
+        reader.readAsDataURL(this.files[0]);
+      }
+    });
+
+    document.getElementById('searchForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      
+      // Show loading indicator
+      const searchResults = document.getElementById('searchResults');
+      const searchLoading = document.getElementById('searchLoading');
+      searchLoading.classList.remove('hidden');
+      searchResults.style.display = 'none';
+      
+      try {
+        const formData = new FormData(e.target);
+        
+        // Log the form data for debugging
+        console.log('Search form data:');
+        for (let [key, value] of formData.entries()) {
+          console.log(`${key}: ${value}`);
+        }
+        
+        const res = await fetch('/search', {
+          method: 'POST',
+          body: formData
+        });
+        const html = await res.text();
+        searchResults.innerHTML = html;
+        searchResults.style.display = 'block';
+      } catch (error) {
+        searchResults.innerHTML = '<p style="color: red;">❌ Lỗi khi tìm kiếm ảnh</p>';
+        searchResults.style.display = 'block';
+        console.error(error);
+      } finally {
+        searchLoading.classList.add('hidden');
+      }
+    });
+    
+    // Load customers on page load
+    document.addEventListener('DOMContentLoaded', () => {
+      loadCustomers();
+    });
+  </script>
+</body>
+</html>

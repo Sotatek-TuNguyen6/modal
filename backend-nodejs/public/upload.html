@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>CLIP Image Management - Thêm ảnh</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      line-height: 1.6;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 20px;
+      color: #333;
+    }
+    h2 {
+      color: #2c3e50;
+      border-bottom: 2px solid #eee;
+      padding-bottom: 10px;
+    }
+    h3 {
+      color: #3498db;
+      margin-top: 30px;
+    }
+    .note {
+      color: #555;
+      font-size: 0.9em;
+      margin: 5px 0;
+      font-style: italic;
+    }
+    .preview-container {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 10px;
+      margin-bottom: 10px;
+    }
+    .preview-image {
+      width: 150px;
+      height: 150px;
+      object-fit: cover;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      transition: transform 0.2s;
+    }
+    .preview-image:hover {
+      transform: scale(1.05);
+      box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    }
+    .selected-file-count {
+      font-weight: bold;
+      color: #333;
+      margin-left: 10px;
+    }
+    .form-group {
+      margin-bottom: 15px;
+    }
+    .form-group label {
+      display: block;
+      margin-bottom: 5px;
+      font-weight: bold;
+    }
+    .form-control {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      box-sizing: border-box;
+    }
+    .btn {
+      background-color: #3498db;
+      color: white;
+      border: none;
+      padding: 10px 15px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 16px;
+    }
+    .btn:hover {
+      background-color: #2980b9;
+    }
+    .result-container {
+      margin-top: 20px;
+      padding: 15px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background-color: #f9f9f9;
+    }
+    .image-card {
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      padding: 10px;
+      text-align: center;
+      background-color: white;
+    }
+    .image-card-info {
+      margin-top: 5px;
+      font-size: 0.9em;
+    }
+    .loading {
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      border: 3px solid rgba(0,0,0,0.3);
+      border-radius: 50%;
+      border-top-color: #3498db;
+      animation: spin 1s ease-in-out infinite;
+      margin-right: 10px;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    .hidden {
+      display: none;
+    }
+    .nav-menu {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+      padding: 10px 0;
+      border-bottom: 2px solid #3498db;
+    }
+    .nav-link {
+      padding: 8px 15px;
+      text-decoration: none;
+      color: #3498db;
+      border-radius: 4px;
+      transition: background-color 0.3s;
+    }
+    .nav-link:hover {
+      background-color: #f1f1f1;
+    }
+    .nav-link.active {
+      background-color: #3498db;
+      color: white;
+    }
+  </style>
+</head>
+<body>
+  <h2>🔍 CLIP Image Management System</h2>
+  
+  <!-- Navigation Menu -->
+  <div class="nav-menu">
+    <a href="index.html" class="nav-link">Tìm kiếm ảnh</a>
+    <a href="upload.html" class="nav-link active">Thêm ảnh</a>
+    <a href="customer.html" class="nav-link">Quản lý khách hàng</a>
+  </div>
+  
+  <h3>📤 Thêm ảnh vào hệ thống AI</h3>
+  <form id="addForm" enctype="multipart/form-data">
+    <div class="form-group">
+      <label for="addImages">Chọn ảnh để thêm:</label>
+      <input type="file" name="images" multiple accept=".jpg,.jpeg,image/jpeg,image/jpg" required id="addImages" class="form-control" />
+      <span class="selected-file-count" id="selectedCount"></span>
+      <p class="note">Chỉ chấp nhận file JPG/JPEG. Tất cả các file sẽ được lưu dưới dạng JPG.</p>
+    </div>
+
+    <div class="form-group">
+      <label for="addCustomer">Khách hàng:</label>
+      <select name="customer" id="addCustomer" class="form-control" required>
+        <option value="">-- Chọn khách hàng --</option>
+        <!-- Customer options will be loaded dynamically -->
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label for="addFolder">Thư mục:</label>
+      <input type="text" name="folder" id="addFolder" placeholder="Tên thư mục" value="general" class="form-control" />
+    </div>
+    
+    <div id="addPreview" class="preview-container"></div>
+    <button type="submit" class="btn">
+      <span id="addLoading" class="loading hidden"></span>
+      Thêm ảnh
+    </button>
+  </form>
+  <div id="addResult" class="result-container" style="display: none;"></div>
+
+  <script>
+    // Load customers for dropdowns
+    async function loadCustomers() {
+      try {
+        const response = await fetch('/api/customers');
+        const customers = await response.json();
+        
+        // Populate customer dropdown
+        const addCustomerSelect = document.getElementById('addCustomer');
+        
+        // Clear existing options except the first one
+        addCustomerSelect.innerHTML = '<option value="">-- Chọn khách hàng --</option>';
+        
+        // Add customer options
+        customers.forEach(customer => {
+          const option = document.createElement('option');
+          option.value = customer._id;
+          option.textContent = `${customer.name} (${customer.code})`;
+          addCustomerSelect.appendChild(option);
+        });
+      } catch (error) {
+        console.error('Error loading customers:', error);
+      }
+    }
+    
+    // Preview for multiple images
+    document.getElementById('addImages').addEventListener('change', function(e) {
+      const preview = document.getElementById('addPreview');
+      const countDisplay = document.getElementById('selectedCount');
+      preview.innerHTML = '';
+      
+      if (this.files && this.files.length > 0) {
+        countDisplay.textContent = `Đã chọn: ${this.files.length} ảnh`;
+        
+        // Show preview of first 10 images
+        const maxPreview = Math.min(10, this.files.length);
+        for (let i = 0; i < maxPreview; i++) {
+          const reader = new FileReader();
+          reader.onload = function(e) {
+            const img = document.createElement('img');
+            img.src = e.target.result;
+            img.classList.add('preview-image');
+            preview.appendChild(img);
+          }
+          reader.readAsDataURL(this.files[i]);
+        }
+        
+        // Show message if more images are selected than previewed
+        if (this.files.length > maxPreview) {
+          const message = document.createElement('div');
+          message.textContent = `... và ${this.files.length - maxPreview} ảnh khác`;
+          message.style.padding = '10px';
+          preview.appendChild(message);
+        }
+      } else {
+        countDisplay.textContent = '';
+      }
+    });
+
+    document.getElementById('addForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      
+      // Show loading indicator
+      const addResult = document.getElementById('addResult');
+      const addLoading = document.getElementById('addLoading');
+      addLoading.classList.remove('hidden');
+      addResult.style.display = 'none';
+      
+      try {
+        const formData = new FormData();
+        
+        // Add customer and folder
+        formData.append('customer', document.getElementById('addCustomer').value);
+        formData.append('folder', document.getElementById('addFolder').value);
+        
+        // Add images
+        const input = document.querySelector('#addForm input[name="images"]');
+        for (let file of input.files) {
+          formData.append('images', file);
+        }
+
+        const res = await fetch('/addImage', {
+          method: 'POST',
+          body: formData
+        });
+        
+        const json = await res.json();
+        
+        let resultHtml = `<p>✅ ${json.message || `Đã thêm: ${json.added.length} ảnh`}</p>`;
+        resultHtml += `<div class="preview-container">`;
+        
+        for (let path of json.added) {
+          resultHtml += `
+            <div class="image-card">
+              <img src="${path}" class="preview-image" />
+              <div class="image-card-info">
+                <div>Customer: ${formData.get('customer') || 'N/A'}</div>
+                <div>Folder: ${formData.get('folder') || 'general'}</div>
+              </div>
+            </div>
+          `;
+        }
+        
+        resultHtml += `</div>`;
+        addResult.innerHTML = resultHtml;
+        addResult.style.display = 'block';
+      } catch (error) {
+        addResult.innerHTML = '<p style="color: red;">❌ Lỗi khi thêm ảnh</p>';
+        addResult.style.display = 'block';
+        console.error(error);
+      } finally {
+        addLoading.classList.add('hidden');
+      }
+    });
+    
+    // Load customers on page load
+    document.addEventListener('DOMContentLoaded', () => {
+      loadCustomers();
+    });
+  </script>
+</body>
+</html> 
