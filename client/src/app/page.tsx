@@ -6,6 +6,22 @@ import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { useMutation } from "@tanstack/react-query";
 
+// Helper function to format date in Vietnamese format (UTC+7)
+const formatDateVN = (date: Date): string => {
+  // Add 7 hours for UTC+7
+  const vnDate = new Date(date.getTime() + (7 * 60 * 60 * 1000));
+  
+  // Format as dd/MM/yyyy HH:mm:ss
+  const day = String(vnDate.getUTCDate()).padStart(2, '0');
+  const month = String(vnDate.getUTCMonth() + 1).padStart(2, '0');
+  const year = vnDate.getUTCFullYear();
+  const hours = String(vnDate.getUTCHours()).padStart(2, '0');
+  const minutes = String(vnDate.getUTCMinutes()).padStart(2, '0');
+  const seconds = String(vnDate.getUTCSeconds()).padStart(2, '0');
+  
+  return `${day}/${month}/${year} ${hours}:${minutes}:${seconds}`;
+};
+
 interface ImageResult {
   id: string;
   url: string;
@@ -44,8 +60,12 @@ const searchImages = async (imageFile: File): Promise<ImageResult[]> => {
   formData.append("image", imageFile);
 
   try {
+    // Sử dụng URL nội bộ cho các yêu cầu API từ server-side
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'https://api.inhoanglinh.click';
+
+    console.log(apiUrl);
     // Gọi API thực tế
-    const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/search`, {
+    const response = await fetch(`${apiUrl}/search`, {
       method: "POST",
       body: formData,
     });
@@ -61,14 +81,12 @@ const searchImages = async (imageFile: File): Promise<ImageResult[]> => {
       throw new Error(data.message || "Lỗi khi tìm kiếm ảnh");
     }
 
-    // Sử dụng trực tiếp kết quả từ API
+    // Luôn sử dụng URL công khai cho hiển thị ảnh trong trình duyệt
     return data.results.map((result) => ({
       id: result.id,
-      url: result.url.startsWith("http")
-        ? result.url
-        : `${process.env.NEXT_PUBLIC_API_URL}${result.url}`,
+      url: result.url.startsWith('http') ? result.url : `${process.env.NEXT_PUBLIC_API_URL}${result.url}`,
       name: result.name || result.filename,
-      date: result.date || new Date().toLocaleDateString(),
+      date: result.date || formatDateVN(new Date()),
       customer: result.customer || "N/A",
       folder: result.folder || "general",
       similarity: result.similarity,
@@ -169,6 +187,7 @@ export default function Home() {
 
   // Truy cập kết quả tìm kiếm từ mutation
   const searchResults = searchMutation.data || [];
+  console.log(searchResults);
   const isSearching = searchMutation.isPending;
   const error = searchMutation.isError
     ? "Có lỗi xảy ra khi tìm kiếm ảnh tương tự. Vui lòng thử lại."
@@ -194,6 +213,7 @@ export default function Home() {
                 width={100}
                 height={24}
                 className="dark:invert"
+                unoptimized={true}
               />
             </Link>
           </div>
@@ -242,6 +262,7 @@ export default function Home() {
                           alt="Preview"
                           fill
                           className="object-cover"
+                          unoptimized={true}
                         />
                       </div>
                       <span>
@@ -302,6 +323,7 @@ export default function Home() {
                     alt="Selected image"
                     fill
                     className="object-contain"
+                    unoptimized={true}
                   />
                 </div>
               </div>
@@ -345,12 +367,13 @@ export default function Home() {
                           alt={image.name}
                           fill
                           className="object-cover"
+                          unoptimized={true}
                         />
-                        {image.similarity !== undefined && (
+                        {/* {image.similarity !== undefined && (
                           <div className="absolute top-2 right-2 bg-black bg-opacity-70 text-white text-xs font-medium px-2 py-1 rounded-full">
                             {image.similarity}% giống
                           </div>
-                        )}
+                        )} */}
                       </div>
                       <div className="p-4">
                         <h3 className="font-medium text-gray-900 dark:text-gray-100 mb-1 truncate">
@@ -384,7 +407,7 @@ export default function Home() {
                     </div>
                   ))
                 ) : (
-                  // Hiển thị gợi ý khi chưa có kết quả
+                  // Hiển thị thông báo khi chưa có kết quả
                   <div className="col-span-full text-center py-10 text-gray-500">
                     <svg
                       className="w-16 h-16 mx-auto text-gray-400 mb-4"
@@ -400,9 +423,11 @@ export default function Home() {
                         d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
                       ></path>
                     </svg>
-                    <p className="text-lg">Chưa có kết quả tìm kiếm</p>
+                    <p className="text-lg">Không tìm thấy ảnh tương tự</p>
                     <p className="mt-2">
-                      Hãy chọn một ảnh để tìm kiếm những ảnh tương tự
+                      {selectedImage ? 
+                        "Không tìm thấy ảnh tương tự với ảnh bạn đã chọn" : 
+                        "Hãy chọn một ảnh để tìm kiếm những ảnh tương tự"}
                     </p>
                   </div>
                 )}

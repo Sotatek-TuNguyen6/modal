@@ -12,6 +12,26 @@ const cors = require("cors");
 const imageRoutes = require("./routes/imageRoute");
 const customerRoutes = require("./routes/customerRoutes");
 
+// Custom function to format date in Vietnamese format (UTC+7)
+function formatDateVN(date) {
+  // Add 7 hours for UTC+7
+  const vnDate = new Date(date.getTime() + (7 * 60 * 60 * 1000));
+  
+  // Format as dd/MM/yyyy HH:mm:ss
+  const day = String(vnDate.getUTCDate()).padStart(2, '0');
+  const month = String(vnDate.getUTCMonth() + 1).padStart(2, '0');
+  const year = vnDate.getUTCFullYear();
+  const hours = String(vnDate.getUTCHours()).padStart(2, '0');
+  const minutes = String(vnDate.getUTCMinutes()).padStart(2, '0');
+  const seconds = String(vnDate.getUTCSeconds()).padStart(2, '0');
+  
+  return `${day}/${month}/${year} ${hours}:${minutes}:${seconds}`;
+}
+
+// Set default value for environment variables
+const CLIP_SERVICE_URL = process.env.CLIP_SERVICE_URL || "http://localhost:5000";
+const PORT = process.env.PORT || 4000;
+
 connectDB();
 
 const app = express();
@@ -65,6 +85,19 @@ const upload = multer({
 
 // Serve static files
 app.use(express.static("public"));
+
+// Middleware to handle Next.js image optimization parameters
+app.use("/uploads", (req, res, next) => {
+  // Check if the URL contains image optimization parameters
+  if (req.url.includes("&w=") || req.url.includes("?w=")) {
+    // Extract the actual image path by removing the query parameters
+    const imagePath = req.url.split(/[?&]/)[0];
+    // Set the new URL for the request
+    req.url = imagePath;
+  }
+  next();
+});
+
 // Serve files from uploads directory
 app.use("/uploads", express.static(UPLOADS_DIR));
 // Also serve files from CLIP storage for backward compatibility
@@ -96,11 +129,21 @@ app.post("/search", upload.single("image"), async (req, res) => {
     const form = new FormData();
     form.append("image", fs.createReadStream(req.file.path));
 
-    const response = await axios.post("http://localhost:5001/search", form, {
+    const response = await axios.post(`${CLIP_SERVICE_URL}/search`, form, {
       headers: form.getHeaders(),
     });
 
     const images = response.data;
+
+    // Kiểm tra nếu không có ảnh nào được tìm thấy
+    if (!images || images.length === 0) {
+      return res.json({
+        success: true,
+        message: "Không tìm thấy ảnh tương tự",
+        results: [],
+        total: 0,
+      });
+    }
 
     // Get image metadata from database for each image
     const imageResults = [];
@@ -138,26 +181,24 @@ app.post("/search", upload.single("image"), async (req, res) => {
           folder: imageInfo ? imageInfo.folder || "general" : "general",
           date: imageInfo
             ? imageInfo.createdAt
-              ? new Date(imageInfo.createdAt).toLocaleDateString()
-              : new Date().toLocaleDateString()
-            : new Date().toLocaleDateString(),
+              ? formatDateVN(new Date(imageInfo.createdAt))
+              : formatDateVN(new Date())
+            : formatDateVN(new Date()),
           similarity: 100 - imageResults.length * 5, // Giả lập độ tương đồng giảm dần
         });
       } catch (error) {
         console.error(`Error fetching metadata for ${imgFilename}:`, error);
-        imageResults.push({
-          id: new mongoose.Types.ObjectId().toString(),
-          filename: imgFilename,
-          path: `/uploads/${imgFilename}`,
-          url: `/uploads/${imgFilename}`,
-          name: imgFilename,
-          customer: "N/A",
-          customerId: null,
-          folder: "general",
-          date: new Date().toLocaleDateString(),
-          similarity: 100 - imageResults.length * 5, // Giả lập độ tương đồng giảm dần
-        });
       }
+    }
+
+    // Nếu không có kết quả sau khi xử lý, trả về thông báo không tìm thấy
+    if (imageResults.length === 0) {
+      return res.json({
+        success: true,
+        message: "Không tìm thấy ảnh tương tự",
+        results: [],
+        total: 0,
+      });
     }
 
     // Trả về kết quả dưới dạng JSON
@@ -186,16 +227,35 @@ app.post("/addImage", upload.array("images", 20), async (req, res) => {
     const { customer, folder } = req.body;
     const folderName = folder || "general";
 
-    // Process files for CLIP service
-    for (let file of req.files) {
+    // Sử dụng API batch upload nếu có nhiều hơn 1 ảnh
+    if (req.files.length > 1) {
+      // Tạo FormData cho batch upload
+      const form = new FormData();
+      
+      // Thêm tất cả các file vào form
+      for (let file of req.files) {
+        form.append("images", fs.createReadStream(file.path), file.filename);
+        // Thêm đường dẫn vào danh sách kết quả
+        const uploadPath = `/uploads/${file.filename}`;
+        addedPaths.push(uploadPath);
+      }
+
+      // Gọi API batch upload
+      await axios.post(`${CLIP_SERVICE_URL}/add-batch`, form, {
+        headers: form.getHeaders(),
+      });
+    } 
+    // Nếu chỉ có 1 ảnh, sử dụng API add thông thường
+    else if (req.files.length === 1) {
+      const file = req.files[0];
       const form = new FormData();
       form.append("image", fs.createReadStream(file.path), file.filename);
 
-      const response = await axios.post("http://localhost:5001/add", form, {
+      await axios.post(`${CLIP_SERVICE_URL}/add`, form, {
         headers: form.getHeaders(),
       });
 
-      // Use local path instead of CLIP service path
+      // Thêm đường dẫn vào danh sách kết quả
       const uploadPath = `/uploads/${file.filename}`;
       addedPaths.push(uploadPath);
     }
@@ -205,13 +265,10 @@ app.post("/addImage", upload.array("images", 20), async (req, res) => {
       await imageService.createImageWithFiles(req.files, customer, folderName);
     }
 
-    // Không cần gọi reload sau mỗi lần thêm ảnh vì /add endpoint đã xử lý
-    // việc thêm vào index
-
     res.json({
       message: customer
-        ? `Đã thêm ảnh cho khách hàng ${customer} vào thư mục ${folderName}`
-        : "Đã thêm ảnh",
+        ? `Đã thêm ${req.files.length} ảnh cho khách hàng ${customer} vào thư mục ${folderName}`
+        : `Đã thêm ${req.files.length} ảnh`,
       added: addedPaths,
     });
   } catch (err) {
@@ -263,7 +320,7 @@ app.get("/api/debug/counter", async (req, res) => {
 // Reload CLIP index manually
 app.post("/api/reload-index", async (req, res) => {
   try {
-    const response = await axios.post("http://localhost:5001/reload");
+    const response = await axios.post(`${CLIP_SERVICE_URL}/reload`);
     console.log("✅ CLIP index reloaded manually");
     res.json({
       message: "Index CLIP đã được tải lại thành công",
@@ -285,7 +342,7 @@ app.delete("/api/images/:filename", async (req, res) => {
     console.log(`Xóa ảnh: ${filename}`);
 
     // Gọi CLIP service để xóa ảnh khỏi index
-    await axios.post("http://localhost:5001/delete", { filename });
+    await axios.post(`${CLIP_SERVICE_URL}/delete`, { filename });
 
     // Xóa thông tin ảnh từ cơ sở dữ liệu
     const deletedImage = await imageService.deleteImageByFilename(filename);
@@ -305,6 +362,21 @@ app.delete("/api/images/:filename", async (req, res) => {
   }
 });
 
-app.listen(3001, () => {
-  console.log("✅ NodeJS server đang chạy tại http://localhost:3001");
+app.post("/api/reset-index", async (req, res) => {
+  try {
+    const response = await axios.post(`${CLIP_SERVICE_URL}/reset`);
+    console.log("✅ CLIP index reset successfully");
+    res.json({ message: "Index CLIP đã được reset thành công" });
+  } catch (error) {
+    console.error("❌ Error resetting CLIP index:", error.message);
+    res.status(500).json({
+      message: "Lỗi khi reset index CLIP",
+      error: error.message,
+    });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`✅ NodeJS server đang chạy tại http://localhost:${PORT}`);
+  console.log(`✅ CLIP service URL: ${CLIP_SERVICE_URL}`);
 });

@@ -6,6 +6,7 @@ import faiss
 import numpy as np
 import os
 import io
+import time
 
 # Fix for OpenMP library conflict on Windows
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -13,8 +14,17 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 app = Flask(__name__)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
+# Check if model is already downloaded
+model_dir = os.path.expanduser("~/.cache/clip")
+model_path = os.path.join(model_dir, "ViT-B-32.pt")
+
 # Load CLIP
-model, preprocess = clip.load("ViT-B/32", device=device)
+print(f"🔄 Loading CLIP model (ViT-B/32) on {device}...")
+start_time = time.time()
+model, preprocess = clip.load("ViT-B/32", device=device, download_root=model_dir)
+load_time = time.time() - start_time
+print(f"✅ CLIP model loaded successfully in {load_time:.2f} seconds")
+print(f"📂 Model stored at: {model_path}")
 
 # Paths
 INDEX_PATH = "faiss_index.idx"
@@ -29,12 +39,29 @@ print(f"🖼️ Images will be stored in: {STORAGE_DIR}")
 if os.path.exists(INDEX_PATH) and os.path.exists(PATHS_PATH):
     index = faiss.read_index(INDEX_PATH)
     image_paths = list(np.load(PATHS_PATH, allow_pickle=True))
+    print(f"📊 Loaded existing index with {len(image_paths)} images")
 else:
     index = faiss.IndexFlatL2(512)
     image_paths = []
+    print("📊 Created new empty index")
+
+@app.route('/', methods=['GET'])
+def status():
+    return jsonify({
+        "status": "ready",
+        "model": "ViT-B/32",
+        "device": device,
+        "index_size": len(image_paths),
+        "model_path": model_path,
+        "message": "CLIP service is running"
+    })
 
 @app.route('/search', methods=['POST'])
 def search_image():
+    # Kiểm tra xem index có dữ liệu không
+    if index.ntotal == 0:
+        return jsonify([]), 200
+        
     file = request.files['image']
     image = Image.open(io.BytesIO(file.read())).convert("RGB")
     image_input = preprocess(image).unsqueeze(0).to(device)
@@ -42,9 +69,16 @@ def search_image():
     with torch.no_grad():
         vec = model.encode_image(image_input).cpu().numpy().astype("float32")
 
-    D, I = index.search(vec, k=3)
-    results = [image_paths[i] for i in I[0]]
-    return jsonify(results)
+    # Giới hạn k theo số lượng ảnh trong index
+    k = min(10, index.ntotal)
+    D, I = index.search(vec, k=k)
+    
+    # Kiểm tra kết quả trước khi truy cập
+    if len(I) > 0 and len(I[0]) > 0:
+        results = [image_paths[i] for i in I[0] if i < len(image_paths)]
+        return jsonify(results)
+    else:
+        return jsonify([])
 
 @app.route('/add', methods=['POST'])
 def add_image():
@@ -257,6 +291,40 @@ def reload_index():
             "errors": errors
         })
 
+@app.route('/reset', methods=['POST'])
+def reset_index():
+    global index, image_paths
+
+    # Xóa file index và paths nếu có
+    if os.path.exists(INDEX_PATH):
+        os.remove(INDEX_PATH)
+        print("🗑️ Đã xóa file FAISS index.")
+
+    if os.path.exists(PATHS_PATH):
+        os.remove(PATHS_PATH)
+        print("🗑️ Đã xóa file features_paths.npy.")
+
+    # Xóa toàn bộ ảnh trong image_storage
+    removed_images = 0
+    for filename in os.listdir(STORAGE_DIR):
+        file_path = os.path.join(STORAGE_DIR, filename)
+        try:
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+                removed_images += 1
+        except Exception as e:
+            print(f"⚠️ Lỗi khi xóa file {file_path}: {e}")
+
+    # Tạo index mới rỗng
+    index = faiss.IndexFlatL2(512)
+    image_paths = []
+    print("✅ Đã khởi tạo index mới rỗng.")
+
+    return jsonify({
+        "message": "Đã reset toàn bộ index và ảnh.",
+        "removed_images": removed_images
+    })
+
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5001)
+    app.run(host='0.0.0.0', port=5000)
