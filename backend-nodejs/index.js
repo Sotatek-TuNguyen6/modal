@@ -11,6 +11,7 @@ const cors = require("cors");
 // Import routes
 const imageRoutes = require("./routes/imageRoute");
 const customerRoutes = require("./routes/customerRoutes");
+const userRoutes = require("./routes/userRouter");
 
 // Custom function to format date in Vietnamese format (UTC+7)
 function formatDateVN(date) {
@@ -109,6 +110,7 @@ app.use(
 // Use routes
 app.use("/api/images", imageRoutes);
 app.use("/api/customers", customerRoutes);
+app.use("/api/users", userRoutes);
 
 // Serve the main HTML pages
 app.get("/", (req, res) => {
@@ -135,6 +137,7 @@ app.post("/search", upload.single("image"), async (req, res) => {
 
     const images = response.data;
 
+    console.log("images", images);
     // Kiểm tra nếu không có ảnh nào được tìm thấy
     if (!images || images.length === 0) {
       return res.json({
@@ -221,61 +224,73 @@ app.post("/search", upload.single("image"), async (req, res) => {
 
 // Thêm nhiều ảnh
 app.post("/addImage", upload.array("images", 20), async (req, res) => {
+  const start = Date.now();
   const addedPaths = [];
   try {
     // Extract customer and folder from request body
     const { customer, folder } = req.body;
     const folderName = folder || "general";
-
-    // Sử dụng API batch upload nếu có nhiều hơn 1 ảnh
-    if (req.files.length > 1) {
-      // Tạo FormData cho batch upload
+    
+    // Tạo danh sách các đường dẫn file đã lưu
+    const savedFiles = req.files.map(file => ({
+      path: file.path,
+      filename: file.filename
+    }));
+    
+    // Trả về response ngay lập tức để client không phải đợi
+    const responsePromise = res.json({
+      success: true,
+      message: `Đang xử lý ${savedFiles.length} ảnh...`,
+      added: savedFiles.map(file => `/uploads/${file.filename}`),
+    });
+    
+    // Đảm bảo response đã được gửi trước khi xử lý
+    await responsePromise;
+    
+    // Xử lý ảnh trong background
+    const processImages = async () => {
+      console.time('image-processing');
+      
+      // Luôn sử dụng batch API để tăng tốc
       const form = new FormData();
       
       // Thêm tất cả các file vào form
-      for (let file of req.files) {
+      for (let file of savedFiles) {
         form.append("images", fs.createReadStream(file.path), file.filename);
-        // Thêm đường dẫn vào danh sách kết quả
-        const uploadPath = `/uploads/${file.filename}`;
-        addedPaths.push(uploadPath);
+        addedPaths.push(`/uploads/${file.filename}`);
       }
-
-      // Gọi API batch upload
-      await axios.post(`${CLIP_SERVICE_URL}/add-batch`, form, {
-        headers: form.getHeaders(),
-      });
-    } 
-    // Nếu chỉ có 1 ảnh, sử dụng API add thông thường
-    else if (req.files.length === 1) {
-      const file = req.files[0];
-      const form = new FormData();
-      form.append("image", fs.createReadStream(file.path), file.filename);
-
-      await axios.post(`${CLIP_SERVICE_URL}/add`, form, {
-        headers: form.getHeaders(),
-      });
-
-      // Thêm đường dẫn vào danh sách kết quả
-      const uploadPath = `/uploads/${file.filename}`;
-      addedPaths.push(uploadPath);
-    }
-
-    // Save to database if customer is provided
-    if (customer) {
-      await imageService.createImageWithFiles(req.files, customer, folderName);
-    }
-
-    res.json({
-      message: customer
-        ? `Đã thêm ${req.files.length} ảnh cho khách hàng ${customer} vào thư mục ${folderName}`
-        : `Đã thêm ${req.files.length} ảnh`,
-      added: addedPaths,
-    });
+      
+      try {
+        // Gọi API batch upload
+        await axios.post(`${CLIP_SERVICE_URL}/add-batch`, form, {
+          headers: form.getHeaders(),
+          timeout: 60000, // 60 giây timeout
+        });
+        
+        // Save to database if customer is provided (sau khi đã trả response)
+        if (customer) {
+          await imageService.createImageWithFiles(req.files, customer, folderName);
+        }
+        
+        console.timeEnd('image-processing');
+        console.log(`✅ Đã xử lý xong ${savedFiles.length} ảnh trong ${(Date.now() - start)/1000}s`);
+      } catch (err) {
+        console.error("❌ Lỗi khi xử lý ảnh:", err.message);
+      }
+    };
+    
+    // Chạy xử lý ảnh sau khi response đã được gửi
+    setImmediate(processImages);
+    
   } catch (err) {
     console.error(err);
     res
       .status(500)
-      .json({ message: "Lỗi khi thêm ảnh. Chỉ chấp nhận file JPG/JPEG." });
+      .json({ 
+        success: false,
+        message: "Lỗi khi thêm ảnh. Chỉ chấp nhận file JPG/JPEG.",
+        error: err.message
+      });
   }
 });
 

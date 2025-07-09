@@ -9,6 +9,9 @@ from PIL import Image
 import time
 from functools import lru_cache
 from transformers import AutoImageProcessor, AutoModel, ConditionalDetrForObjectDetection, ConditionalDetrImageProcessor
+from huggingface_hub import login
+
+import shutil
 
 app = Flask(__name__)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -62,6 +65,15 @@ def load_models_if_needed():
             print(f"Lỗi khi tải mô hình DETR: {e}")
             raise
 
+# Preload models in background to avoid cold start
+def preload_models():
+    print("⏳ Preloading models in background...")
+    try:
+        load_models_if_needed()
+        print("✅ Models preloaded successfully!")
+    except Exception as e:
+        print(f"❌ Error preloading models: {e}")
+
 # === Load index ===
 print("Đang tải FAISS index...")
 if os.path.exists(INDEX_PATH) and os.path.exists(PATHS_PATH):
@@ -74,26 +86,27 @@ else:
     print("Tạo index mới")
 
 # === Hàm trích xuất đặc trưng với cache ===
-@lru_cache(maxsize=100)  # Cache kết quả cho 100 ảnh gần nhất
+@lru_cache(maxsize=200)  # Tăng cache size lên 200 ảnh
 def extract_feature_dino(image_path):
     start_time = time.time()
     try:
         # Đảm bảo model đã được tải
         load_models_if_needed()
         
+        # Đọc ảnh với chất lượng gốc
         image = Image.open(image_path).convert("RGB")
-        # Giảm kích thước ảnh để tăng tốc xử lý
-        if max(image.size) > 512:
-            image.thumbnail((512, 512), Image.LANCZOS)
             
+        # Xử lý với DINO - giữ nguyên chất lượng ảnh
         inputs = dino_processor(images=image, return_tensors="pt").to(DEVICE)
         with torch.no_grad():
             outputs = dino_model(**inputs)
             feat = outputs.last_hidden_state[:, 0]
             feat = torch.nn.functional.normalize(feat, dim=-1)
+        
         result = feat.cpu().numpy().squeeze()
         
-        print(f"Trích xuất đặc trưng DINO: {time.time() - start_time:.2f}s")
+        elapsed = time.time() - start_time
+        print(f"Trích xuất đặc trưng DINO: {elapsed:.2f}s")
         return result
     except Exception as e:
         print(f"Lỗi trích xuất đặc trưng: {e}")
@@ -106,81 +119,83 @@ def crop_dress(image_path, save_path):
     try:
         # Đảm bảo model đã được tải
         load_models_if_needed()
-        
-        # Kiểm tra thời gian tối đa
-        if time.time() - start_time > TIMEOUT_SECONDS:
-            print("Timeout khi crop ảnh")
+            
+        # Đọc ảnh với OpenCV giữ nguyên kích thước gốc
+        img_cv2 = cv2.imread(image_path)
+        if img_cv2 is None:
+            print(f"⚠️ Không thể đọc ảnh: {image_path}")
             return False
             
-        image = Image.open(image_path).convert("RGB")
-        width, height = image.size
+        # Lấy kích thước ảnh
+        height, width = img_cv2.shape[:2]
         
-        # Giảm kích thước ảnh để tăng tốc xử lý
-        if max(width, height) > 512:
-            image.thumbnail((512, 512), Image.LANCZOS)
-            width, height = image.size
+        # Sử dụng ảnh gốc không resize
+        orig_img = img_cv2
             
+        # Chuyển đổi sang PIL để xử lý với DETR
+        image = Image.fromarray(cv2.cvtColor(img_cv2, cv2.COLOR_BGR2RGB))
+        
+        # Xử lý với DETR - giữ nguyên chất lượng ảnh
         inputs = detr_processor(images=image, return_tensors="pt").to(DEVICE)
         with torch.no_grad():
             outputs = detr_model(**inputs)
 
-        logits = outputs.logits
-        boxes = outputs.pred_boxes
-        probs = logits.softmax(-1)[0, :, :-1]
+        # Xử lý kết quả
+        probs = outputs.logits.softmax(-1)[0, :, :-1]
         keep = probs.max(dim=-1).values > 0.7
-        boxes = boxes[0, keep]
+        boxes = outputs.pred_boxes[0, keep]
         labels = probs[keep].argmax(dim=-1)
         
-        # Đọc ảnh với OpenCV với kích thước nhỏ hơn
-        img_cv2 = cv2.imread(image_path)
-        if img_cv2 is None:
-            print(f"Không thể đọc ảnh: {image_path}")
-            return False
-            
-        if max(img_cv2.shape[0], img_cv2.shape[1]) > 1024:
-            scale = 1024 / max(img_cv2.shape[0], img_cv2.shape[1])
-            img_cv2 = cv2.resize(img_cv2, None, fx=scale, fy=scale)
-
+        # Tìm váy/skirt
+        found = False
         for i, box in enumerate(boxes):
-            # Kiểm tra timeout
-            if time.time() - start_time > TIMEOUT_SECONDS:
-                print("Timeout khi xử lý boxes")
-                return False
-                
             label = detr_model.config.id2label[labels[i].item()]
             if "dress" in label.lower() or "skirt" in label.lower():
+                # Lấy tọa độ box
                 cx, cy, w, h = box
+                
+                # Tính toán tọa độ trên ảnh gốc
                 x1 = int((cx - w / 2) * width)
                 y1 = int((cy - h / 2) * height)
                 x2 = int((cx + w / 2) * width)
                 y2 = int((cy + h / 2) * height)
                 
-                # Tính toán tỷ lệ giữa ảnh gốc và ảnh đã resize
-                img_height, img_width = img_cv2.shape[:2]
-                scale_x = img_width / width
-                scale_y = img_height / height
-                
-                # Áp dụng tỷ lệ vào tọa độ
-                x1_scaled = int(x1 * scale_x)
-                y1_scaled = int(y1 * scale_y)
-                x2_scaled = int(x2 * scale_x)
-                y2_scaled = int(y2 * scale_y)
-                
-                crop = img_cv2[max(y1_scaled,0):min(y2_scaled,img_height), max(x1_scaled,0):min(x2_scaled,img_width)]
-                if crop.size == 0: continue
-                
-                # Resize nhỏ hơn để tiết kiệm bộ nhớ
+                x1, y1 = max(x1, 0), max(y1, 0)
+                x2, y2 = min(x2, width), min(y2, height)
+
+                # Crop và lưu ảnh với kích thước gốc
+                crop = orig_img[y1:y2, x1:x2]
+                if crop.size == 0:
+                    continue
+                    
+                # Lưu ảnh crop không resize
                 crop = cv2.resize(crop, (224, 224))
                 cv2.imwrite(save_path, crop)
-                
-                print(f"Crop ảnh: {time.time() - start_time:.2f}s")
-                return True
-                
-        print(f"Không tìm thấy váy/chân váy: {time.time() - start_time:.2f}s")
-        return False
+                found = True
+                break
+        
+        # Nếu không tìm thấy, sử dụng crop mặc định
+        if not found:
+            # Crop mặc định vùng giữa ảnh
+            x1, y1, x2, y2 = 89, 273, 300, 600
+            x1, y1 = max(x1, 0), max(y1, 0)
+            x2, y2 = min(x2, width), min(y2, height)
+
+            crop = img_cv2[y1:y2, x1:x2]
+            crop = cv2.resize(crop, (224, 224))
+            cv2.imwrite(save_path, crop)
+        
+        print(f"Crop ảnh: {time.time() - start_time:.2f}s")
+        return True
     except Exception as e:
         print(f"Lỗi khi crop ảnh: {e}")
-        return False
+        # Nếu có lỗi, giữ nguyên ảnh gốc
+        try:
+            # Sao chép ảnh gốc mà không resize
+            shutil.copy(image_path, save_path)
+            return True
+        except:
+            return False
 
 # === API ===
 
@@ -210,13 +225,10 @@ def add_image():
     save_path = os.path.join(STORAGE_DIR, filename)
     file.save(save_path)
 
-    crop_path = save_path.replace(".", "_crop.")
-    cropped = crop_dress(save_path, crop_path)
-    used_path = crop_path if cropped else save_path
-
-    vec = extract_feature_dino(used_path).astype("float32").reshape(1, -1)
+    # Trích xuất đặc trưng trực tiếp từ ảnh gốc, không cần crop
+    vec = extract_feature_dino(save_path).astype("float32").reshape(1, -1)
     index.add(vec)
-    image_paths.append(used_path)
+    image_paths.append(save_path)
 
     # Chỉ lưu index sau mỗi 5 ảnh hoặc khi thời gian xử lý dưới ngưỡng
     if len(image_paths) % 5 == 0 or time.time() - start_time < 5:
@@ -225,7 +237,7 @@ def add_image():
         print(f"Đã lưu index với {len(image_paths)} ảnh")
     
     print(f"Thêm ảnh: {time.time() - start_time:.2f}s")
-    return jsonify({"message": "Đã thêm ảnh", "path": used_path})
+    return jsonify({"message": "Đã thêm ảnh", "path": save_path})
 
 @app.route('/add-batch', methods=['POST'])
 def add_images_batch():
@@ -237,46 +249,71 @@ def add_images_batch():
     if len(files) == 0:
         return jsonify({"error": "Không có file nào được gửi"}), 400
     
-    added_paths = []
-    vectors = []
-    
+    # Lưu tất cả các file trước khi xử lý bất đồng bộ
+    saved_files = []
     for file in files:
-        # Kiểm tra timeout
-        if time.time() - start_time > TIMEOUT_SECONDS * 2:  # Cho phép thời gian dài hơn cho batch
-            break
-            
         if file.filename == '':
             continue
             
         filename = file.filename
         save_path = os.path.join(STORAGE_DIR, filename)
+        # Lưu file ngay lập tức để tránh lỗi "I/O operation on closed file"
         file.save(save_path)
-        
-        crop_path = save_path.replace(".", "_crop.")
-        cropped = crop_dress(save_path, crop_path)
-        used_path = crop_path if cropped else save_path
-        
-        try:
-            vec = extract_feature_dino(used_path).astype("float32").reshape(1, -1)
-            vectors.append(vec)
-            image_paths.append(used_path)
-            added_paths.append(used_path)
-        except Exception as e:
-            print(f"Lỗi xử lý ảnh {filename}: {e}")
+        saved_files.append((save_path, filename))
     
-    # Thêm tất cả các vector vào index một lần
-    if vectors:
-        index.add(np.vstack(vectors))
-        faiss.write_index(index, INDEX_PATH)
-        np.save(PATHS_PATH, np.array(image_paths))
-        print(f"Đã lưu index batch với {len(image_paths)} ảnh")
+    # Trả về response ngay lập tức để không block client
+    response = {
+        "message": f"Đang xử lý {len(saved_files)} ảnh...",
+        "status": "processing",
+        "total": len(saved_files)
+    }
     
-    print(f"Thêm batch {len(added_paths)} ảnh: {time.time() - start_time:.2f}s")
-    return jsonify({
-        "message": f"Đã thêm {len(added_paths)} ảnh",
-        "added": added_paths,
-        "total": len(image_paths)
-    })
+    # Tạo thread để xử lý ảnh trong background
+    def process_images():
+        added_paths = []
+        vectors = []
+        
+        # Tăng batch size để xử lý nhanh hơn
+        batch_size = min(10, len(saved_files))  # Xử lý tối đa 10 ảnh cùng lúc
+        
+        for i in range(0, len(saved_files), batch_size):
+            batch_files = saved_files[i:i+batch_size]
+            batch_vectors = []
+            batch_paths = []
+            
+            # Xử lý từng ảnh trong batch
+            for save_path, filename in batch_files:
+                try:
+                    # Trích xuất đặc trưng trực tiếp từ ảnh gốc, không cần crop
+                    vec = extract_feature_dino(save_path).astype("float32").reshape(1, -1)
+                    batch_vectors.append(vec)
+                    batch_paths.append(save_path)
+                    added_paths.append(save_path)
+                except Exception as e:
+                    print(f"Lỗi xử lý ảnh {filename}: {e}")
+            
+            # Thêm vectors vào index
+            if batch_vectors:
+                vectors.extend(batch_vectors)
+                image_paths.extend(batch_paths)
+        
+        # Thêm tất cả các vector vào index một lần
+        if vectors:
+            index.add(np.vstack(vectors))
+            faiss.write_index(index, INDEX_PATH)
+            np.save(PATHS_PATH, np.array(image_paths))
+            print(f"Đã lưu index batch với {len(image_paths)} ảnh")
+        
+        elapsed = time.time() - start_time
+        print(f"Thêm batch {len(added_paths)} ảnh: {elapsed:.2f}s ({elapsed/len(saved_files):.2f}s/ảnh)")
+    
+    # Chạy xử lý ảnh trong thread riêng
+    import threading
+    thread = threading.Thread(target=process_images)
+    thread.daemon = True
+    thread.start()
+    
+    return jsonify(response)
 
 @app.route('/search', methods=['POST'])
 def search_image():
@@ -287,14 +324,11 @@ def search_image():
     file = request.files['image']
     temp_path = f"temp_query_{int(time.time())}.jpg"  # Tên file duy nhất
     try:
-        with open(temp_path, "wb") as f:
-            f.write(file.read())
-
-        crop_path = temp_path.replace(".", "_crop.")
-        cropped = crop_dress(temp_path, crop_path)
-        used_path = crop_path if cropped else temp_path
-
-        vec = extract_feature_dino(used_path).astype("float32").reshape(1, -1)
+        # Lưu file trước khi xử lý
+        file.save(temp_path)
+        
+        # Trích xuất đặc trưng trực tiếp từ ảnh gốc
+        vec = extract_feature_dino(temp_path).astype("float32").reshape(1, -1)
         D, I = index.search(vec, k=min(10, index.ntotal))
 
         results = [image_paths[i] for i in I[0] if i < len(image_paths)]
@@ -306,12 +340,11 @@ def search_image():
         return jsonify([])
     finally:
         # Dọn dẹp file tạm
-        for p in [temp_path, temp_path.replace(".", "_crop.")]:
-            if os.path.exists(p):
-                try:
-                    os.remove(p)
-                except:
-                    pass
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass
 
 @app.route('/delete', methods=['POST'])
 def delete_image():
@@ -366,10 +399,8 @@ def delete_image():
     faiss.write_index(index, INDEX_PATH)
     np.save(PATHS_PATH, np.array(image_paths))
 
-    # Xóa ảnh gốc và ảnh crop nếu có
+    # Xóa ảnh gốc
     to_delete = [os.path.join(STORAGE_DIR, filename)]
-    crop_version = filename.replace(".", "_crop.")
-    to_delete.append(os.path.join(STORAGE_DIR, crop_version))
     for path in to_delete:
         if os.path.exists(path):
             try:
@@ -388,7 +419,7 @@ def reload_index():
     image_files = [
         os.path.join(STORAGE_DIR, f)
         for f in os.listdir(STORAGE_DIR)
-        if f.lower().endswith(('.jpg', '.jpeg', '.png')) and '_crop' not in f
+        if f.lower().endswith(('.jpg', '.jpeg', '.png'))
     ]
 
     image_paths = []
@@ -409,16 +440,13 @@ def reload_index():
                 print("Timeout khi reload index")
                 break
                 
-            crop_path = path.replace(".", "_crop.")
-            cropped = crop_dress(path, crop_path)
-            used_path = crop_path if cropped else path
-
             try:
-                vec = extract_feature_dino(used_path).astype("float32").reshape(1, -1)
+                # Trích xuất đặc trưng trực tiếp từ ảnh gốc
+                vec = extract_feature_dino(path).astype("float32").reshape(1, -1)
                 batch_vectors.append(vec)
-                batch_paths.append(used_path)
+                batch_paths.append(path)
             except Exception as e:
-                print(f"Lỗi ảnh {used_path}: {e}")
+                print(f"Lỗi ảnh {path}: {e}")
         
         if batch_vectors:
             new_index.add(np.vstack(batch_vectors))
@@ -460,5 +488,11 @@ def reset_index():
     return jsonify({"message": "Đã reset toàn bộ hệ thống và xóa ảnh"})
 
 if __name__ == '__main__':
+    # Preload models in background thread
+    import threading
+    preload_thread = threading.Thread(target=preload_models)
+    preload_thread.daemon = True
+    preload_thread.start()
+    
     # Khởi động Flask với timeout cao hơn
     app.run(host="0.0.0.0", port=5000, threaded=True)

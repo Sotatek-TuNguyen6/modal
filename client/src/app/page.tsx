@@ -5,6 +5,8 @@ import Image from "next/image";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { useMutation } from "@tanstack/react-query";
+import { useAuth } from "@/hooks/useAuth";
+import { signOut } from "next-auth/react";
 
 // Helper function to format date in Vietnamese format (UTC+7)
 const formatDateVN = (date: Date): string => {
@@ -120,6 +122,7 @@ const searchImages = async (imageFile: File): Promise<ImageResult[]> => {
 // };
 
 export default function Home() {
+  const { session, authenticated } = useAuth();
   const [selectedImage, setSelectedImage] = useState<File | null>(null);
   const [selectedImageUrl, setSelectedImageUrl] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -200,6 +203,10 @@ export default function Home() {
   //   }
   // };
 
+  const handleSignOut = () => {
+    signOut({ callbackUrl: "/login" });
+  };
+
   return (
     <div className="flex flex-col min-h-screen">
       {/* Header */}
@@ -236,6 +243,27 @@ export default function Home() {
             >
               Thêm khách hàng
             </Link>
+            
+            {authenticated ? (
+              <div className="flex items-center space-x-3">
+                <span className="text-sm text-gray-600 dark:text-gray-400">
+                  {session?.user?.email}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleSignOut}
+                >
+                  Đăng xuất
+                </Button>
+              </div>
+            ) : (
+              <Link href="/login">
+                <Button variant="outline" size="sm">
+                  Đăng nhập
+                </Button>
+              </Link>
+            )}
           </nav>
         </div>
       </header>
